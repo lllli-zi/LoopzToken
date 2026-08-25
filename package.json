@@ -1,0 +1,25 @@
+{
+  "name": "loopztoken",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "bun run --filter @loopz/web dev",
+    "dev:api": "bun run --filter @loopz/control-api dev",
+    "dev:worker": "bun run --filter @loopz/worker dev",
+    "build": "bun run --filter '@loopz/*' build",
+    "typecheck": "bun run --filter '@loopz/*' typecheck",
+    "test": "bun run --filter '@loopz/web' test",
+    "lint": "bun run --filter '@loopz/web' lint",
+    "db:generate": "bun run --filter @loopz/database generate",
+    "db:migrate": "bun run --filter @loopz/database migrate",
+    "db:push": "bun run --filter @loopz/database push",
+    "db:studio": "bun run --filter @loopz/database studio"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

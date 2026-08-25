@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxlint/main/npm/oxlint/configuration-schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {}
+}

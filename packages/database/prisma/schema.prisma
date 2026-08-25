@@ -1,0 +1,744 @@
+// LoopzToken 权威数据模型（TECHNICAL_SOLUTION 17）
+//
+// 约定：
+// - 金额一律 BigInt 微元：1 CNY = 1,000,000 micro-CNY（15.1），业务层禁止浮点。
+// - wallet_ledger 等账务流水不可变，禁止 UPDATE / DELETE。
+// - 所有写操作幂等键在数据库层建立唯一约束（idempotency_records / 业务表冗余键）。
+// - api_requests / request_attempts / usage_records 计划按月分区：
+//   Prisma 不支持声明式分区，分区与保留策略在手写迁移（sql）中实现，
+//   新增迁移时保持与该 Schema 字段一致。
+// - Prompt 与模型输出默认不落盘（17.5）。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// 枚举
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  DISABLED
+  REVOKED
+}
+
+enum ModelStatus {
+  DRAFT
+  PUBLISHED
+  DEPRECATED
+  OFFLINE
+}
+
+enum PriceVersionStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+enum Protocol {
+  OPENAI_CHAT
+  OPENAI_RESPONSES
+  ANTHROPIC_MESSAGES
+  GEMINI_NATIVE
+  CUSTOM_HTTP
+}
+
+enum ProviderStatus {
+  ENABLED
+  DISABLED
+}
+
+enum DeploymentStatus {
+  ENABLED
+  DISABLED
+}
+
+enum ReservationStatus {
+  RESERVED
+  SETTLED
+  RELEASED
+  EXPIRED
+}
+
+enum LedgerEntryType {
+  RECHARGE
+  CONSUME
+  REFUND
+  ADMIN_ADJUST
+}
+
+enum PaymentChannel {
+  MOCK
+  WECHAT
+  ALIPAY
+}
+
+enum OrderStatus {
+  PENDING
+  PAYING
+  PAID
+  CREDITED
+  REFUNDING
+  REFUNDED
+  COMPENSATION_REQUIRED
+  CLOSED
+}
+
+enum PaymentAttemptStatus {
+  CREATED
+  SUCCEEDED
+  FAILED
+  EXPIRED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REFUNDING
+  REFUNDED
+  REJECTED
+  FAILED
+}
+
+// 请求计费状态机（TECHNICAL_SOLUTION 15.5）
+enum RequestStatus {
+  CREATED
+  RESERVED
+  UPSTREAM_STARTED
+  STREAMING
+  SETTLED
+  RELEASED
+  PENDING_BILLING
+  MANUAL_REVIEW
+  FAILED
+}
+
+enum AttemptStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCEEDED
+  FAILED
+  ABORTED
+}
+
+// Usage 证据优先级（TECHNICAL_SOLUTION 15.6）
+enum UsageSource {
+  PROVIDER_BILL
+  FINAL_USAGE_FIELD
+  STREAM_ACCUMULATED
+  LOCAL_ESTIMATE
+}
+
+enum ProviderBillingSource {
+  BILL_API
+  STATEMENT
+  MANUAL
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+}
+
+enum ReconciliationStatus {
+  RUNNING
+  PASSED
+  FAILED
+  ATTENTION
+}
+
+// ---------------------------------------------------------------------------
+// 17.1 业务表
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid())
+  email        String?    @unique
+  phone        String?    @unique
+  // Argon2id 哈希（PRD 11.4）
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  sessions  UserSession[]
+  consents  UserConsent[]
+  apiKeys   ApiKey[]
+  wallet    Wallet?
+  orders    Order[]
+  refunds   Refund[]
+  requests  ApiRequest[]
+  tickets   SupportTicket[]
+}
+
+model UserSession {
+  id              String    @id @default(uuid())
+  userId          String
+  // 会话令牌只存哈希
+  sessionTokenHash String   @unique
+  ip              String?
+  userAgent       String?
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("user_sessions")
+}
+
+model UserConsent {
+  id          String   @id @default(uuid())
+  userId      String
+  docType     String
+  docVersion  String
+  consentedAt DateTime @default(now())
+  ip          String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, docType, docVersion])
+  @@map("user_consents")
+}
+
+model AdminRole {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  permissions Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("admin_roles")
+}
+
+model ApiKey {
+  id          String       @id @default(uuid())
+  userId      String
+  name        String
+  // sk-loopz_<public_id>_<secret>，只存 public_id 与 HMAC（TECHNICAL_SOLUTION 10）
+  publicId    String       @unique
+  keyPrefix   String
+  secretHmac  String
+  status      ApiKeyStatus @default(ACTIVE)
+  expiresAt   DateTime?
+  // 每日金额上限（micro-CNY）
+  dailyBudgetMicros BigInt?
+  // { rpm, tpm, concurrency }
+  rateLimitProfile  Json?
+  // IP 白名单（KEY-005）
+  ipWhitelist       Json?
+  createdAt   DateTime     @default(now())
+  revokedAt   DateTime?
+  updatedAt    DateTime     @updatedAt
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permissions ApiKeyPermission[]
+  requests    ApiRequest[]
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+model ApiKeyPermission {
+  id          String  @id @default(uuid())
+  apiKeyId    String
+  // 模型白名单匹配模式，如 "claude-*"
+  modelPattern String
+  allowed     Boolean @default(true)
+
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId])
+  @@map("api_key_permissions")
+}
+
+model Model {
+  id            String       @id @default(uuid())
+  // 公开模型名（稳定别名策略待业务确认，PRD 15）
+  name          String       @unique
+  status        ModelStatus  @default(DRAFT)
+  protocols     Protocol[]
+  contextWindow Int
+  maxOutput     Int
+  description   String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  aliases       ModelAlias[]
+  priceVersions ModelPriceVersion[]
+  deployments   ModelDeployment[]
+
+  @@map("models")
+}
+
+model ModelAlias {
+  id      String @id @default(uuid())
+  alias   String @unique
+  modelId String
+
+  model Model @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@map("model_aliases")
+}
+
+// 价格版本不可变：调价新建版本，只结束生效不修改历史（OPS-003 / 25.3）
+model ModelPriceVersion {
+  id            String             @id @default(uuid())
+  modelId       String
+  version       Int
+  status        PriceVersionStatus @default(DRAFT)
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  // 单价：micro-CNY / 百万 Token（整数，避免浮点）
+  inputMicros        BigInt
+  outputMicros       BigInt
+  cacheWriteMicros   BigInt
+  cacheReadMicros    BigInt
+  reasoningMicros    BigInt
+  // 服务等级附加费率（千分比）
+  serviceTierSurchargePermille Int @default(0)
+  createdAt     DateTime           @default(now())
+
+  model       Model        @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  settlements Settlement[]
+  requests    ApiRequest[]
+
+  @@unique([modelId, version])
+  @@map("model_price_versions")
+}
+
+model Provider {
+  id     String         @id @default(uuid())
+  name   String         @unique
+  status ProviderStatus @default(ENABLED)
+  baseUrl String
+  // 上游余额安全阈值（micro 单位，低于则摘除，路由过滤条件 11.1）
+  balanceLowWatermark Json?
+  notes  String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  credentials ProviderCredential[]
+  deployments ModelDeployment[]
+
+  @@map("providers")
+}
+
+// 上游凭据只保存 KMS / Secret Manager 引用，不保存明文（21.2）
+model ProviderCredential {
+  id            String   @id @default(uuid())
+  providerId    String
+  credentialRef String
+  status        String   @default("ACTIVE")
+  rotatedAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+  @@map("provider_credentials")
+}
+
+// Deployment：某公开模型在某 Provider 上的具体部署（6.3）
+model ModelDeployment {
+  id            String           @id @default(uuid())
+  modelId       String
+  providerId    String
+  upstreamModel String
+  protocol      Protocol
+  status        DeploymentStatus @default(ENABLED)
+  priority      Int              @default(0)
+  weight        Int              @default(1)
+  maxConcurrency Int             @default(0)
+  rpmLimit      Int              @default(0)
+  tpmLimit      Int              @default(0)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  model    Model            @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  provider Provider         @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  attempts RequestAttempt[]
+
+  @@unique([modelId, providerId, upstreamModel])
+  @@map("model_deployments")
+}
+
+// 路由策略版本化配置（11.2 评分权重可组合）
+model RoutingPolicy {
+  id        String   @id @default(uuid())
+  name      String
+  // 候选过滤与评分规则 JSON
+  rules     Json
+  version   Int
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name, version])
+  @@map("routing_policies")
+}
+
+// ---------------------------------------------------------------------------
+// 17.2 账务表
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  // balance / frozen >= 0 由服务层事务保证（并发冻结测试见 24.2）
+  balanceMicros BigInt @default(0)
+  frozenMicros  BigInt @default(0)
+  updatedAt DateTime @updatedAt
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reservations WalletReservation[]
+  ledger       WalletLedger[]
+
+  @@map("wallets")
+}
+
+model WalletReservation {
+  id             String            @id @default(uuid())
+  userId         String
+  walletId       String
+  amountMicros   BigInt
+  status         ReservationStatus @default(RESERVED)
+  // 冗余幂等键，数据库唯一约束保证重复调用返回原结果（15.5）
+  idempotencyKey String            @unique
+  settledAt      DateTime?
+  releasedAt     DateTime?
+  createdAt      DateTime          @default(now())
+
+  // 关联的 API 请求：外键在 ApiRequest.reservationId（1:1，不可变，15.5）
+  wallet     Wallet             @relation(fields: [walletId], references: [id])
+  request    ApiRequest?
+  ledger     WalletLedger[]
+  settlement Settlement?
+
+  @@index([walletId, status])
+  @@map("wallet_reservations")
+}
+
+// 不可变账本流水：只允许 INSERT（BILL-002）
+model WalletLedger {
+  id                String          @id @default(uuid())
+  walletId          String
+  entryType         LedgerEntryType
+  // 有符号金额：正为入账，负为扣减
+  amountMicros      BigInt
+  balanceAfterMicros BigInt
+  reservationId     String?
+  orderId           String?
+  refundId          String?
+  adjustmentReason  String?
+  idempotencyKey    String          @unique
+  createdAt         DateTime        @default(now())
+
+  wallet      Wallet             @relation(fields: [walletId], references: [id])
+  reservation WalletReservation? @relation(fields: [reservationId], references: [id])
+  order       Order?             @relation(fields: [orderId], references: [id])
+  refund      Refund?            @relation(fields: [refundId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@map("wallet_ledger")
+}
+
+// 支付状态机见 TECHNICAL_SOLUTION 16.2
+model Order {
+  id           String        @id @default(uuid())
+  orderNo      String        @unique
+  userId       String
+  channel      PaymentChannel
+  amountMicros BigInt
+  status       OrderStatus   @default(PENDING)
+  subject      String
+  paidAt       DateTime?
+  creditedAt   DateTime?
+  closedAt     DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  user          User                 @relation(fields: [userId], references: [id])
+  attempts      PaymentAttempt[]
+  notifications PaymentNotification[]
+  refunds       Refund[]
+  ledger        WalletLedger[]
+
+  @@index([userId, createdAt])
+  @@map("orders")
+}
+
+model PaymentAttempt {
+  id               String               @id @default(uuid())
+  orderId          String
+  // 支付流水号唯一索引（16.3）
+  providerPaymentId String?             @unique
+  prepayId         String?
+  status           PaymentAttemptStatus @default(CREATED)
+  amountMicros     BigInt
+  createdAt        DateTime             @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("payment_attempts")
+}
+
+// 回调原始数据脱敏 / 加密保存（16.3）
+model PaymentNotification {
+  id               String    @id @default(uuid())
+  orderId          String?
+  providerPaymentId String
+  channel          PaymentChannel
+  rawRedacted      String
+  verified         Boolean   @default(false)
+  processedAt      DateTime?
+  createdAt        DateTime  @default(now())
+
+  order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([providerPaymentId])
+  @@map("payment_notifications")
+}
+
+model Refund {
+  id           String       @id @default(uuid())
+  refundNo     String       @unique
+  orderId      String
+  userId       String
+  amountMicros BigInt
+  status       RefundStatus @default(REQUESTED)
+  reason       String
+  operatorId   String?
+  refundedAt   DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  order  Order         @relation(fields: [orderId], references: [id])
+  user   User          @relation(fields: [userId], references: [id])
+  ledger WalletLedger[]
+
+  @@index([orderId])
+  @@map("refunds")
+}
+
+// 结算记录：费用证据链（BILL-010 / 15.6）
+model Settlement {
+  id               String       @id @default(uuid())
+  requestId        String       @unique
+  reservationId    String       @unique
+  amountMicros     BigInt
+  priceVersionId   String
+  usageSource      UsageSource
+  parserVersion    String
+  estimated        Boolean      @default(false)
+  createdAt        DateTime     @default(now())
+
+  request      ApiRequest        @relation(fields: [requestId], references: [id])
+  reservation  WalletReservation @relation(fields: [reservationId], references: [id])
+  priceVersion ModelPriceVersion @relation(fields: [priceVersionId], references: [id])
+
+  @@map("settlements")
+}
+
+model Reconciliation {
+  id                   String               @id @default(uuid())
+  // 对账日期
+  date                 DateTime             @db.Date
+  type                 String
+  status               ReconciliationStatus @default(RUNNING)
+  differenceCount      Int                  @default(0)
+  differenceAmountMicros BigInt              @default(0)
+  report               Json?
+  createdAt            DateTime             @default(now())
+
+  @@map("reconciliations")
+}
+
+// ---------------------------------------------------------------------------
+// 17.3 请求表（计划按月分区，见文件头注释）
+// ---------------------------------------------------------------------------
+
+model ApiRequest {
+  id             String        @id @default(uuid())
+  userId         String
+  apiKeyId       String
+  publicModel    String
+  protocol       Protocol
+  status         RequestStatus @default(CREATED)
+  reservationId  String?       @unique
+  priceVersionId String?
+  errorMessage   String?
+  startedAt      DateTime      @default(now())
+  finishedAt     DateTime?
+
+  user         User                @relation(fields: [userId], references: [id])
+  apiKey       ApiKey              @relation(fields: [apiKeyId], references: [id])
+  reservation  WalletReservation?  @relation(fields: [reservationId], references: [id])
+  priceVersion ModelPriceVersion?  @relation(fields: [priceVersionId], references: [id])
+  attempts     RequestAttempt[]
+  usage        UsageRecord?
+  settlement   Settlement?
+
+  @@index([userId, startedAt])
+  @@index([status, startedAt])
+  @@map("api_requests")
+}
+
+// 每次上游尝试单独记录费用证据，跨 Provider 重试不覆盖（15.5）
+model RequestAttempt {
+  id                String        @id @default(uuid())
+  requestId         String
+  attemptNo         Int
+  providerId        String
+  deploymentId      String
+  providerRequestId String?
+  status            AttemptStatus @default(PENDING)
+  errorClass        String?
+  upstreamCostMicros BigInt?
+  startedAt         DateTime      @default(now())
+  endedAt           DateTime?
+
+  request   ApiRequest             @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  deployment ModelDeployment       @relation(fields: [deploymentId], references: [id])
+  usage     UsageRecord?
+  providerBilling ProviderBillingRecord[]
+
+  @@unique([requestId, attemptNo])
+  @@index([providerRequestId])
+  @@index([deploymentId, startedAt])
+  @@map("request_attempts")
+}
+
+model UsageRecord {
+  id                String      @id @default(uuid())
+  requestId         String      @unique
+  attemptId         String      @unique
+  inputTokens       Int         @default(0)
+  outputTokens      Int         @default(0)
+  cacheWriteTokens  Int         @default(0)
+  cacheReadTokens   Int         @default(0)
+  reasoningTokens   Int         @default(0)
+  usageSource       UsageSource
+  parserVersion     String
+  estimated         Boolean     @default(false)
+  createdAt         DateTime    @default(now())
+
+  request ApiRequest      @relation(fields: [requestId], references: [id])
+  attempt RequestAttempt @relation(fields: [attemptId], references: [id])
+
+  @@map("usage_records")
+}
+
+model ProviderBillingRecord {
+  id                String                @id @default(uuid())
+  attemptId         String
+  providerRequestId String
+  providerId        String
+  costMicros        BigInt
+  currency          String                @default("CNY")
+  source            ProviderBillingSource
+  fetchedAt         DateTime              @default(now())
+
+  attempt RequestAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, providerRequestId])
+  @@map("provider_billing_records")
+}
+
+// ---------------------------------------------------------------------------
+// 17.4 审计与可靠性
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorType  String
+  actorId    String?
+  action     String
+  targetType String
+  targetId   String?
+  before     Json?
+  after      Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// Outbox：业务事务内写入，Worker FOR UPDATE SKIP LOCKED 消费（19.1）
+model OutboxEvent {
+  id          String       @id @default(uuid())
+  eventType   String
+  payload     Json
+  status      OutboxStatus @default(PENDING)
+  attempts    Int          @default(0)
+  nextRunAt   DateTime     @default(now())
+  lastError   String?
+  createdAt   DateTime     @default(now())
+  doneAt      DateTime?
+
+  @@index([status, nextRunAt])
+  @@map("outbox_events")
+}
+
+model IdempotencyRecord {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  scope     String
+  result    Json?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model RiskEvent {
+  id       String   @id @default(uuid())
+  userId   String?
+  apiKeyId String?
+  type     String
+  severity String
+  detail   Json?
+  status   String   @default("OPEN")
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("risk_events")
+}
+
+model SupportTicket {
+  id        String       @id @default(uuid())
+  userId    String
+  subject   String
+  status    TicketStatus @default(OPEN)
+  messages  Json?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("support_tickets")
+}

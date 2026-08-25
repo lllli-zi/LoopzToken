@@ -1,0 +1,18 @@
+# Prometheus 抓取配置（本地 / 生产基线）。
+# TODO: Gateway / Billing 暴露 /metrics（指标清单见 TECHNICAL_SOLUTION 20.2），
+# 生产使用托管监控或自建 Prometheus + Grafana（首期不部署 Loki/Tempo）。
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets: ["gateway:8080"]
+
+  - job_name: billing
+    static_configs:
+      - targets: ["billing:8081"]
+
+  - job_name: control-api
+    static_configs:
+      - targets: ["control-api:3000"]

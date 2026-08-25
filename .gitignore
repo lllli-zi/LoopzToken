@@ -1,0 +1,25 @@
+# dependencies / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+
+# os
+.DS_Store
+
+# go
+services/gateway/loopz-gateway
+services/billing/loopz-billing
+
+# tmp files (Gateway 大请求体临时文件目录，见 TECHNICAL_SOLUTION 13)
+tmp/
+
+# vibe doctor 生成状态（证据可再生，不入库；vibe_doctor.py 保留）
+.vibe/last-check.json

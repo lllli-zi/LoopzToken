@@ -1,0 +1,96 @@
+@import 'tailwindcss';
+
+/*
+ * 设计 Token（UI_TECH_STACK 6.2）
+ * 业务代码使用语义变量，不直接散落品牌色十六进制值。
+ * 明暗主题通过 .dark class 切换（next-themes）。
+ */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-destructive: var(--destructive);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --success: oklch(0.63 0.17 149);
+  --warning: oklch(0.79 0.16 86);
+  --destructive: oklch(0.6 0.24 27);
+  --chart-1: oklch(0.55 0.2 262);
+  --chart-2: oklch(0.62 0.17 165);
+  --chart-3: oklch(0.68 0.16 75);
+  --chart-4: oklch(0.61 0.21 310);
+  --chart-5: oklch(0.63 0.18 45);
+  --chart-6: oklch(0.65 0.22 200);
+  --radius: 0.5rem;
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.556 0 0);
+  --success: oklch(0.68 0.16 152);
+  --warning: oklch(0.82 0.15 86);
+  --destructive: oklch(0.65 0.22 27);
+  --chart-1: oklch(0.62 0.2 262);
+  --chart-2: oklch(0.68 0.16 165);
+  --chart-3: oklch(0.75 0.15 75);
+  --chart-4: oklch(0.66 0.2 310);
+  --chart-5: oklch(0.68 0.18 45);
+  --chart-6: oklch(0.7 0.2 200);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+}
